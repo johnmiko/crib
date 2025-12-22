@@ -33,6 +33,7 @@ class GameStateResponse(BaseModel):
     action_required: ActionType
     message: str
     your_hand: List[CardData]
+    computer_hand: List[CardData]  # For debugging
     table_cards: List[CardData]
     scores: Dict[str, int]  # {"you": 0, "computer": 0}
     dealer: str

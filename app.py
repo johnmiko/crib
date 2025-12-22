@@ -2,13 +2,14 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Literal
 import uuid
 
-from cribbage.cribbagegame import CribbageGame, CribbageRound
+from cribbage.cribbagegame import CribbageGame, CribbageRound, debug
 from cribbage.player import Player, RandomPlayer
 from cribbage.models import ActionType, GameStateResponse, PlayerAction, CardData
-from cribbage.playingcards import Card
+from cribbage.playingcards import Card, Deck
+from pydantic import BaseModel
 
 
 app = FastAPI()
@@ -96,6 +97,8 @@ class ResumableRound:
         self.phase = 'start'
         self.active_players = None
         self.sequence_start_idx = 0
+        # Optional overrides for deterministic starts
+        self.overrides: Dict = {}
         
     def run(self):
         """Run the round until completion or until player input needed."""
@@ -104,6 +107,19 @@ class ResumableRound:
         if self.phase == 'start':
             r._cut()
             r._deal()
+            # Apply any deal/hand overrides for deterministic test sessions
+            if self.overrides.get('hands'):
+                # Build a set of (rank_name, suit_name) for removal from deck
+                def _key(c: Card):
+                    return (c.get_rank(), c.get_suit())
+                remove_keys = set()
+                for plist in self.overrides['hands'].values():
+                    for c in plist:
+                        remove_keys.add(_key(c))
+                # Filter deck to remove overridden cards so no duplicates appear later
+                r.deck.cards = [c for c in r.deck.cards if _key(c) not in remove_keys]
+                # Overwrite hands
+                r.hands = {p: list(self.overrides['hands'].get(p, r.hands[p])) for p in r.hands}
             self.phase = 'crib'
         
         if self.phase == 'crib':
@@ -116,12 +132,32 @@ class ResumableRound:
             self.phase = 'play'
         
         if self.phase == 'play':
+            # If we're resuming with a pending human selection, ensure human acts first
+            try:
+                from app import APIPlayer as _APIPlayer  # local check without circular import issues
+            except Exception:
+                _APIPlayer = APIPlayer  # fallback when already in this module
+            if self.active_players:
+                # Prioritize APIPlayer with a pending selection so we don't let the computer sneak an extra turn
+                def _priority(p):
+                    if isinstance(p, _APIPlayer) and getattr(p, 'pending_selection', None) is not None:
+                        return 0
+                    return 1
+                # Stable sort keeps other order but moves the human with pending selection to front
+                self.active_players = sorted(self.active_players, key=_priority)
+
             while sum([len(v) for v in r.hands.values()]):
                 self.sequence_start_idx = len(r.table)
                 
                 while self.active_players:
                     players_to_check = list(self.active_players)
                     for p in players_to_check:
+                        # Debug current selection context
+                        try:
+                            seq_cards = ", ".join(str(m['card']) for m in r.table[self.sequence_start_idx:])
+                        except Exception:
+                            seq_cards = ""
+                        debug(f"[PLAY] Next: {p} | seq=[{seq_cards}] | value={r.get_table_value(self.sequence_start_idx)} | hand={r.hands.get(p, [])}")
                         card = p.select_card_to_play(
                             hand=r.hands[p],
                             table=r.table[self.sequence_start_idx:],
@@ -129,12 +165,14 @@ class ResumableRound:
                         )  # May raise AwaitingPlayerInput
                         
                         if card is None or card.get_value() + r.get_table_value(self.sequence_start_idx) > 31:
+                            debug(f"[GO] {p} cannot play or chose go (value={r.get_table_value(self.sequence_start_idx)})")
                             self.active_players.remove(p)
                         else:
                             r.table.append({'player': p, 'card': card})
                             r.hands[p].remove(card)
                             if not r.hands[p]:
                                 self.active_players.remove(p)
+                            debug(f"[PLAY] {p} plays {card} -> value={r.get_table_value(self.sequence_start_idx)}")
                             score = r._score_play(card_seq=[move['card'] for move in r.table[self.sequence_start_idx:]])
                             if score:
                                 r.game.board.peg(p, score)
@@ -189,10 +227,14 @@ class GameSession:
         self.last_n_cards: int = 0
         self.game_over: bool = False
         self.round_num: int = 0
+        # One-time overrides for next new round
+        self.next_dealer_override: Optional[Player] = None
+        self.next_round_overrides: Dict = {}
         
     def get_state(self) -> GameStateResponse:
         """Get current game state."""
         your_hand = []
+        computer_hand = []
         table_cards = []
         table_value = 0
         starter_card = None
@@ -200,16 +242,21 @@ class GameSession:
         
         if self.current_round:
             your_hand = [card_to_data(c) for c in self.current_round.hands.get(self.human, [])]
+            computer_hand = [card_to_data(c) for c in self.current_round.hands.get(self.computer, [])]
             table_cards = [card_to_data(m['card']) for m in self.current_round.table]
             
             if self.current_round.table:
-                # Find the current sequence start
-                sequence_start = 0
-                for i in range(len(self.current_round.table) - 1, -1, -1):
-                    val_sum = sum(m['card'].get_value() for m in self.current_round.table[i:])
-                    if val_sum > 31:
-                        sequence_start = i + 1
-                        break
+                # Prefer the active sequence_start_idx tracked by the resumable round
+                if getattr(self.current_round, 'sequence_start_idx', None) is not None:
+                    sequence_start = self.current_round.sequence_start_idx
+                else:
+                    # Fallback: derive start by scanning for last break over 31
+                    sequence_start = 0
+                    for i in range(len(self.current_round.table) - 1, -1, -1):
+                        val_sum = sum(m['card'].get_value() for m in self.current_round.table[i:])
+                        if val_sum > 31:
+                            sequence_start = i + 1
+                            break
                 table_value = sum(m['card'].get_value() for m in self.current_round.table[sequence_start:])
             
             if self.current_round.starter:
@@ -241,6 +288,7 @@ class GameSession:
             action_required=self.waiting_for or ActionType.WAITING_FOR_COMPUTER,
             message=self.message,
             your_hand=your_hand,
+            computer_hand=computer_hand,
             table_cards=table_cards,
             scores={str(p).lower(): self.game.board.get_score(p) for p in self.game.players},
             dealer=dealer,
@@ -253,8 +301,16 @@ class GameSession:
     
     def start_new_round(self):
         """Start a new round."""
-        dealer = self.game.players[self.round_num % len(self.game.players)]
+        if self.next_dealer_override is not None:
+            dealer = self.next_dealer_override
+            # Clear override after use
+            self.next_dealer_override = None
+        else:
+            dealer = self.game.players[self.round_num % len(self.game.players)]
         self.current_round = ResumableRound(game=self.game, dealer=dealer)
+        if self.next_round_overrides:
+            self.current_round.overrides = self.next_round_overrides
+            self.next_round_overrides = {}
         self.round_num += 1
     
     def advance(self) -> GameStateResponse:
@@ -396,6 +452,31 @@ class GameSession:
         return self.advance()
 
 
+# Request model for creating a new game with optional overrides
+class CreateGameRequest(BaseModel):
+    dealer: Optional[Literal['human','computer','you','player']] = None
+    preset: Optional[Literal['aces_twos_vs_threes_fours']] = None
+    # Future: explicit card lists like ["ace-hearts", "two-spades"], not used yet
+    human_cards: Optional[List[str]] = None
+    computer_cards: Optional[List[str]] = None
+
+
+def _make_card(rank_name: str, suit_name: str) -> Card:
+    return Card(rank=Deck.RANKS[rank_name], suit=Deck.SUITS[suit_name])
+
+
+def _generate_cards_for_ranks(ranks: List[str], n: int) -> List[Card]:
+    suits = list(Deck.SUITS.keys())  # hearts, diamonds, clubs, spades
+    cards: List[Card] = []
+    i = 0
+    while len(cards) < n:
+        rank = ranks[i % len(ranks)]
+        suit = suits[i % len(suits)]
+        cards.append(_make_card(rank, suit))
+        i += 1
+    return cards
+
+
 # In-memory game storage
 games: Dict[str, GameSession] = {}
 
@@ -407,10 +488,36 @@ def healthcheck():
 
 
 @app.post("/game/new")
-def create_game() -> GameStateResponse:
-    """Create a new game."""
+def create_game(req: Optional[CreateGameRequest] = None) -> GameStateResponse:
+    """Create a new game with optional deterministic setup."""
     game_id = str(uuid.uuid4())
     session = GameSession(game_id)
+
+    # Configure dealer if specified
+    if req and req.dealer:
+        dealer_key = req.dealer.lower()
+        if dealer_key in ("human", "you", "player"):
+            session.next_dealer_override = session.human
+        elif dealer_key == "computer":
+            session.next_dealer_override = session.computer
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid dealer: {req.dealer}")
+
+    # Configure preset hands if requested
+    if req and req.preset:
+        preset = req.preset
+        if preset == 'aces_twos_vs_threes_fours':
+            human_cards = _generate_cards_for_ranks(["ace", "two"], 6)
+            computer_cards = _generate_cards_for_ranks(["three", "four"], 6)
+            session.next_round_overrides = {
+                'hands': {
+                    session.human: human_cards,
+                    session.computer: computer_cards,
+                }
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown preset: {preset}")
+
     games[game_id] = session
     return session.advance()
 

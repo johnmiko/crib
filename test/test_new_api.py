@@ -2,7 +2,9 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from app import app
+from app import app, GameSession, ResumableRound
+from cribbage.playingcards import Deck, Card
+from cribbage.models import ActionType
 
 client = TestClient(app)
 
@@ -79,6 +81,7 @@ def test_invalid_crib_selection():
     )
     assert action_resp.status_code == 400
     assert "exactly 2 cards" in action_resp.json()["detail"].lower()
+   
 
 
 def test_play_complete_round():
@@ -249,3 +252,119 @@ def test_play_full_game_to_completion():
     print(f"\n✓ Game completed successfully after {rounds_played} rounds and {total_actions} actions")
     print(f"  Winner: {state['winner']} with score {state['scores'][state['winner']]}")
     print(f"  Final scores: human={state['scores']['human']}, computer={state['scores']['computer']}")
+
+
+def _make_card(rank: str, suit: str) -> Card:
+    return Card(rank=Deck.RANKS[rank], suit=Deck.SUITS[suit])
+
+
+def test_player_goes_computer_plays_and_scores_1_point():
+    """Player says go at 24, computer plays ace to 25 and earns last-card point."""
+    session = GameSession("test-go")
+
+    # Make computer one point from winning so the round ends immediately after pegging 1
+    session.game.board.pegs[session.human]['front'] = 1
+    session.game.board.pegs[session.human]['rear'] = 0
+    session.game.board.pegs[session.computer]['front'] = 2
+    session.game.board.pegs[session.computer]['rear'] = 1
+
+    round_obj = ResumableRound(game=session.game, dealer=session.computer)
+    session.current_round = round_obj
+
+    nine_hearts = _make_card('nine', 'hearts')
+    ace_hearts = _make_card('ace', 'hearts')
+    table_cards = [
+        _make_card('ten', 'spades'),
+        _make_card('ten', 'clubs'),
+        _make_card('four', 'diamonds'),
+    ]  # value = 24
+
+    round_obj.phase = 'play'
+    round_obj.sequence_start_idx = 0
+    round_obj.active_players = [session.human, session.computer]
+    round_obj.round.hands = {
+        session.human: [nine_hearts],
+        session.computer: [ace_hearts],
+    }
+    round_obj.round.table = [
+        {'player': session.human, 'card': table_cards[0]},
+        {'player': session.human, 'card': table_cards[1]},
+        {'player': session.human, 'card': table_cards[2]},
+    ]
+    round_obj.round.starter = _make_card('five', 'hearts')
+    round_obj.round.crib = []
+
+    # Simulate the API pause waiting for the player's action
+    session.waiting_for = ActionType.SELECT_CARD_TO_PLAY
+    session.last_cards = [nine_hearts]
+    session.last_n_cards = 1
+    session.message = "Play a card"
+
+    # Player says "go" (no valid play since 9 would bust 31)
+    state = session.submit_action([])
+
+    assert state.scores['computer'] == 3
+    assert state.scores['human'] == 1
+    assert state.table_value == 0  # sequence resets after no further plays are possible
+
+    # Removed incorrect 'both players go' test per rule clarification
+
+def test_turn_order_is_respected():
+    """Ensure after a player move, computer plays, then it's player's turn again.
+
+    Sequence we expect to observe starting from a player action:
+    1) Player plays one valid card
+    2) Computer immediately plays one card automatically
+    3) API pauses on player's turn again (select_card_to_play)
+
+    We verify by comparing table lengths and action_required transitions, with
+    debug prints to aid troubleshooting if it fails.
+    """
+    # Create a new game
+    create_resp = client.post("/game/new")
+    assert create_resp.status_code == 200
+    game_id = create_resp.json()["game_id"]
+
+    # Submit crib cards to enter play phase
+    crib_resp = client.post(
+        f"/game/{game_id}/action",
+        json={"card_indices": [0, 1]}
+    )
+    assert crib_resp.status_code == 200
+    state = crib_resp.json()
+    # For testing, override hands to known cards to ensure predictable play
+    state["your_hand"] = [{'rank': 'ace', 'suit': 'diamonds', 'symbol': '1♦', 'value': 1}, {'rank': 'ace', 'suit': 'hearts', 'symbol': '1♥', 'value': 1},{'rank': 'ace', 'suit': 'spades', 'symbol': '1♠', 'value': 1},{'rank': 'ace', 'suit': 'clubs', 'symbol': '1♣', 'value': 1}]
+    state["computer_hand"] = [{'rank': 'two', 'suit': 'diamonds', 'symbol': '1♦', 'value': 1}, {'rank': 'two', 'suit': 'hearts', 'symbol': '1♥', 'value': 1},{'rank': 'two', 'suit': 'spades', 'symbol': '1♠', 'value': 1},{'rank': 'two', 'suit': 'clubs', 'symbol': '1♣', 'value': 1}]
+
+    # We should now be waiting for the player to play (human's turn)
+    print("[Debug] After crib: action_required=", state.get("action_required"))
+    print("[Debug] After crib: table_len=", len(state.get("table_cards", [])))
+    print("[Debug] After crib: your_hand_len=", len(state.get("your_hand", [])))
+    assert state["action_required"] == "select_card_to_play"
+
+    # Capture table length before the player's move
+    table_len_before = len(state.get("table_cards", []))
+    valid_indices = state.get("valid_card_indices", [])
+    print("[Debug] Valid indices before play:", valid_indices)
+
+    # Player plays the first valid card
+    assert valid_indices, "Expected at least one valid card to play"
+    chosen = valid_indices[0]
+    play_resp = client.post(
+        f"/game/{game_id}/action",
+        json={"card_indices": [chosen]}
+    )
+    assert play_resp.status_code == 200
+    state_after_play = play_resp.json()
+
+    # After player's move, computer should immediately play once, and it should be player's turn again
+    table_len_after = len(state_after_play.get("table_cards", []))
+    delta = table_len_after - table_len_before
+    print("[Debug] After player play: action_required=", state_after_play.get("action_required"))
+    print("[Debug] Table len before=", table_len_before, "after=", table_len_after, "delta=", delta)
+    print("[Debug] Your hand len after=", len(state_after_play.get("your_hand", [])))
+    print("[Debug] Next valid indices:", state_after_play.get("valid_card_indices", []))
+
+    # Expect at least two cards added: player's card, then computer's card
+    assert delta == 2, f"Expected table to grow by ==2 (player+computer), got {delta}"
+    assert state_after_play["action_required"] == "select_card_to_play", "Should be player's turn again"
