@@ -193,9 +193,13 @@ class CribbageRound:
             player_of_last_card = self.table[-1]['player']
             self.game.board.peg(player_of_last_card, 1)
             print("Point to %s for last card played." % player_of_last_card)
-            active_players = [p for p in self.game.players if p != player_of_last_card and self.hands[p]]
+            # Fix: mutate the list in place instead of reassigning
+            new_players = [p for p in self.game.players if p != player_of_last_card and self.hands[p]]
             if self.hands[player_of_last_card]:
-                active_players += [player_of_last_card]
+                new_players.append(player_of_last_card)
+            active_players.clear()
+            active_players.extend(new_players)
+
 
     def _score_play(self, card_seq):
         """Return score for latest move in an active play sequence.

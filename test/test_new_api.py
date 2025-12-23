@@ -8,6 +8,9 @@ from cribbage.models import ActionType
 
 client = TestClient(app)
 
+ACES_HAND = [{'rank': 'ace', 'suit': 'diamonds', 'symbol': '1♦', 'value': 1}, {'rank': 'ace', 'suit': 'hearts', 'symbol': '1♥', 'value': 1},{'rank': 'ace', 'suit': 'spades', 'symbol': '1♠', 'value': 1},{'rank': 'ace', 'suit': 'clubs', 'symbol': '1♣', 'value': 1}]
+TWO_HAND = [{'rank': 'two', 'suit': 'diamonds', 'symbol': '1♦', 'value': 1}, {'rank': 'two', 'suit': 'hearts', 'symbol': '1♥', 'value': 1},{'rank': 'two', 'suit': 'spades', 'symbol': '1♠', 'value': 1},{'rank': 'two', 'suit': 'clubs', 'symbol': '1♣', 'value': 1}]
+
 
 def test_healthcheck():
     """Test healthcheck endpoint."""
@@ -163,7 +166,7 @@ def test_scores_update():
     game_id = create_resp.json()["game_id"]
     initial_state = create_resp.json()
     
-    initial_human_score = initial_state["scores"]["human"]
+    initial_you_score = initial_state["scores"]["you"]
     initial_computer_score = initial_state["scores"]["computer"]
     
     # Submit crib cards
@@ -175,9 +178,9 @@ def test_scores_update():
     
     # Scores might have changed due to "his heels" (if starter is a jack)
     # Just verify scores are present and valid
-    assert "human" in state_after_crib["scores"]
+    assert "you" in state_after_crib["scores"]
     assert "computer" in state_after_crib["scores"]
-    assert state_after_crib["scores"]["human"] >= initial_human_score
+    assert state_after_crib["scores"]["you"] >= initial_you_score
     assert state_after_crib["scores"]["computer"] >= initial_computer_score
 
 
@@ -239,7 +242,7 @@ def test_play_full_game_to_completion():
     # Verify game completed successfully
     assert state["game_over"], f"Game did not complete after {rounds_played} rounds and {total_actions} actions"
     assert state["winner"] is not None, "Game over but no winner declared"
-    assert state["winner"] in ["human", "computer"], f"Invalid winner: {state['winner']}"
+    assert state["winner"] in ["you", "computer"], f"Invalid winner: {state['winner']}"
     
     # Verify winning score
     winner_score = state["scores"][state["winner"]]
@@ -251,7 +254,7 @@ def test_play_full_game_to_completion():
     
     print(f"\n✓ Game completed successfully after {rounds_played} rounds and {total_actions} actions")
     print(f"  Winner: {state['winner']} with score {state['scores'][state['winner']]}")
-    print(f"  Final scores: human={state['scores']['human']}, computer={state['scores']['computer']}")
+    print(f"  Final scores: you={state['scores']['you']}, computer={state['scores']['computer']}")
 
 
 def _make_card(rank: str, suit: str) -> Card:
@@ -304,10 +307,195 @@ def test_player_goes_computer_plays_and_scores_1_point():
     state = session.submit_action([])
 
     assert state.scores['computer'] == 3
-    assert state.scores['human'] == 1
+    assert state.scores['you'] == 1
     assert state.table_value == 0  # sequence resets after no further plays are possible
 
     # Removed incorrect 'both players go' test per rule clarification
+
+def test_table_value_count_with_aces_and_twos():
+    """Test that table_value (count) is correct when playing aces and twos.
+    
+    Player has aces (value 1), computer has twos (value 2).
+    After player plays ace: count should be 1
+    After computer plays two: count should be 3
+    """
+    session = GameSession("test-count")
+    
+    # Set up the game state directly
+    round_obj = ResumableRound(game=session.game, dealer=session.computer)
+    session.current_round = round_obj
+    
+    # Create known hands: player has aces, computer has twos
+    # Give them extra cards so the round doesn't end
+    ace_diamonds = _make_card('ace', 'diamonds')
+    ace_hearts = _make_card('ace', 'hearts')
+    ace_spades = _make_card('ace', 'spades')
+    ace_clubs = _make_card('ace', 'clubs')
+    two_diamonds = _make_card('two', 'diamonds')
+    two_hearts = _make_card('two', 'hearts')
+    two_spades = _make_card('two', 'spades')
+    two_clubs = _make_card('two', 'clubs')
+    
+    round_obj.phase = 'play'
+    round_obj.sequence_start_idx = 0
+    round_obj.active_players = [session.human, session.computer]
+    round_obj.round.hands = {
+        session.human: [ace_diamonds, ace_hearts, ace_spades, ace_clubs],
+        session.computer: [two_diamonds, two_hearts, two_spades, two_clubs],
+    }
+    round_obj.round.table = []
+    round_obj.round.starter = _make_card('five', 'hearts')
+    round_obj.round.crib = []
+    
+    # Set up for player's turn
+    session.waiting_for = ActionType.SELECT_CARD_TO_PLAY
+    session.last_cards = [ace_diamonds, ace_hearts, ace_spades, ace_clubs]
+    session.last_n_cards = 1
+    session.message = "Play a card"
+    
+    # Player plays first ace (index 0)
+    state = session.submit_action([0])
+    
+    print(f"\n[Debug] After player plays ace:")
+    print(f"  Table cards: {[f'{c.rank}{c.suit[0]}' for c in state.table_cards]}")
+    print(f"  Table value: {state.table_value}")
+    print(f"  Expected: 3 (ace=1, then computer plays two=2, total 1+2=3)")
+    
+    # After player plays ace, computer should have played a two automatically
+    # Table should have 2 cards: ace (1) + two (2) = 3
+    assert len(state.table_cards) == 2, f"Expected 2 cards on table, got {len(state.table_cards)}"
+    assert state.table_cards[0].rank == 'ace', "First card should be ace"
+    assert state.table_cards[1].rank == 'two', "Second card should be two"
+    assert state.table_value == 3, f"Expected table_value to be 3 (ace=1 + two=2), got {state.table_value}"
+    
+    print(f"  ✓ Table value correct: {state.table_value}")
+    
+    # Play another round: player plays second ace
+    state = session.submit_action([0])  # Index 0 because first ace was removed
+    
+    print(f"\n[Debug] After player plays second ace:")
+    print(f"  Table cards: {[f'{c.rank}{c.suit[0]}' for c in state.table_cards]}")
+    print(f"  Table value: {state.table_value}")
+    print(f"  Expected: 6 (1 + 2 + 1 + 2)")
+    
+    # Should now have 4 cards: ace, two, ace, two = 1+2+1+2 = 6
+    assert len(state.table_cards) == 4, f"Expected 4 cards on table, got {len(state.table_cards)}"
+    assert state.table_value == 6, f"Expected table_value to be 6 (1+2+1+2), got {state.table_value}"
+    
+    print(f"  ✓ Table value correct: {state.table_value}")
+
+
+def test_scoring_pairs_and_fifteens(monkeypatch):
+    """Deterministic test: pairs score 2 and reaching 15 scores 2.
+
+    We patch the computer's selection logic to be deterministic:
+    - Prefer making 15 if possible
+    - Otherwise prefer making a pair with the last card if possible
+    - Otherwise play the first legal card
+    We then run two separate scenarios to check both scoring cases.
+    """
+
+    # Deterministic computer strategy
+    from cribbage.player import RandomPlayer as _RP
+
+    def _deterministic_select(self, hand, table, crib):
+        # table is a list of { 'player': Player, 'card': Card }
+        table_value = sum(m['card'].get_value() for m in table)
+        valid = [c for c in hand if c.get_value() + table_value <= 31]
+        if not valid:
+            return None
+        # Prefer making 15
+        for c in valid:
+            if c.get_value() + table_value == 15:
+                return c
+        # Prefer making a pair with last card
+        if table:
+            last_rank = table[-1]['card'].get_rank()
+            for c in valid:
+                if c.get_rank() == last_rank:
+                    return c
+        # Fallback: first valid
+        return valid[0]
+
+    monkeypatch.setattr(_RP, "select_card_to_play", _deterministic_select, raising=True)
+
+    # ---------- Scenario 1: 5 then 10 => 15 scores 2 ----------
+    session = GameSession("test-scoring-15")
+    round_obj = ResumableRound(game=session.game, dealer=session.computer)
+    session.current_round = round_obj
+
+    five_d = _make_card('five', 'diamonds')
+    ten_d = _make_card('ten', 'diamonds')
+    ten_h = _make_card('ten', 'hearts')
+    ten_c = _make_card('ten', 'clubs')
+    ten_s = _make_card('ten', 'spades')
+    five_h = _make_card('five', 'hearts')
+    five_s = _make_card('five', 'spades')
+    five_c = _make_card('five', 'clubs')
+
+    round_obj.phase = 'play'
+    round_obj.sequence_start_idx = 0
+    round_obj.active_players = [session.human, session.computer]
+    round_obj.round.hands = {
+        session.human: [five_d, ten_d, ten_h, ten_c],
+        session.computer: [ten_s, five_h, five_s, five_c],
+    }
+    round_obj.round.table = []
+    round_obj.round.starter = _make_card('ace', 'hearts')
+    round_obj.round.crib = []
+
+    session.game.board.pegs[session.human]['front'] = 0
+    session.game.board.pegs[session.human]['rear'] = 0
+    session.game.board.pegs[session.computer]['front'] = 0
+    session.game.board.pegs[session.computer]['rear'] = 0
+
+    session.waiting_for = ActionType.SELECT_CARD_TO_PLAY
+    session.last_cards = [five_d, ten_d, ten_h, ten_c]
+    session.last_n_cards = 1
+    session.message = "Play a card"
+
+    state = session.submit_action([0])  # play 5♦, computer should play 10♠ to make 15
+    assert state.table_value == 15, f"Expected count 15, got {state.table_value}"
+    assert state.scores['computer'] == 2, f"Computer should score 2 for 15, got {state.scores['computer']}"
+
+    # ---------- Scenario 2: 10 then 10 => pair scores 2 ----------
+    session2 = GameSession("test-scoring-pair")
+    round_obj2 = ResumableRound(game=session2.game, dealer=session2.computer)
+    session2.current_round = round_obj2
+
+    ten_d2 = _make_card('ten', 'diamonds')
+    ten_h2 = _make_card('ten', 'hearts')
+    ten_s2 = _make_card('ten', 'spades')
+    five_d2 = _make_card('five', 'diamonds')
+    five_h2 = _make_card('five', 'hearts')
+
+    round_obj2.phase = 'play'
+    round_obj2.sequence_start_idx = 0
+    round_obj2.active_players = [session2.human, session2.computer]
+    round_obj2.round.hands = {
+        session2.human: [ten_d2, five_h2],
+        session2.computer: [ten_s2, ten_h2],
+    }
+    round_obj2.round.table = []
+    round_obj2.round.starter = _make_card('ace', 'hearts')
+    round_obj2.round.crib = []
+
+    session2.game.board.pegs[session2.human]['front'] = 0
+    session2.game.board.pegs[session2.human]['rear'] = 0
+    session2.game.board.pegs[session2.computer]['front'] = 0
+    session2.game.board.pegs[session2.computer]['rear'] = 0
+
+    session2.waiting_for = ActionType.SELECT_CARD_TO_PLAY
+    session2.last_cards = [ten_d2, five_h2]
+    session2.last_n_cards = 1
+    session2.message = "Play a card"
+
+    state2 = session2.submit_action([0])  # play 10♦, computer should play 10♠ for a pair
+    assert state2.table_value == 20, f"Expected count 20, got {state2.table_value}"
+    assert state2.scores['computer'] == 2, f"Computer should score 2 for pair, got {state2.scores['computer']}"
+
+    print("\n[Test] Deterministic scoring verified: 15 and pair both score 2 points")
+
 
 def test_turn_order_is_respected():
     """Ensure after a player move, computer plays, then it's player's turn again.
@@ -333,8 +521,8 @@ def test_turn_order_is_respected():
     assert crib_resp.status_code == 200
     state = crib_resp.json()
     # For testing, override hands to known cards to ensure predictable play
-    state["your_hand"] = [{'rank': 'ace', 'suit': 'diamonds', 'symbol': '1♦', 'value': 1}, {'rank': 'ace', 'suit': 'hearts', 'symbol': '1♥', 'value': 1},{'rank': 'ace', 'suit': 'spades', 'symbol': '1♠', 'value': 1},{'rank': 'ace', 'suit': 'clubs', 'symbol': '1♣', 'value': 1}]
-    state["computer_hand"] = [{'rank': 'two', 'suit': 'diamonds', 'symbol': '1♦', 'value': 1}, {'rank': 'two', 'suit': 'hearts', 'symbol': '1♥', 'value': 1},{'rank': 'two', 'suit': 'spades', 'symbol': '1♠', 'value': 1},{'rank': 'two', 'suit': 'clubs', 'symbol': '1♣', 'value': 1}]
+    state["your_hand"] = ACES_HAND    
+    state["computer_hand"] = TWO_HAND
 
     # We should now be waiting for the player to play (human's turn)
     print("[Debug] After crib: action_required=", state.get("action_required"))

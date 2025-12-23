@@ -147,8 +147,6 @@ class ResumableRound:
                 self.active_players = sorted(self.active_players, key=_priority)
 
             while sum([len(v) for v in r.hands.values()]):
-                self.sequence_start_idx = len(r.table)
-                
                 while self.active_players:
                     players_to_check = list(self.active_players)
                     for p in players_to_check:
@@ -178,6 +176,8 @@ class ResumableRound:
                                 r.game.board.peg(p, score)
                 
                 r.go_or_31_reached(self.active_players)
+                # Reset sequence start for next sequence after go/31
+                self.sequence_start_idx = len(r.table)
                 self.active_players = [p for p in r.game.players if r.hands[p]]
             
             self.phase = 'scoring'
@@ -246,18 +246,14 @@ class GameSession:
             table_cards = [card_to_data(m['card']) for m in self.current_round.table]
             
             if self.current_round.table:
-                # Prefer the active sequence_start_idx tracked by the resumable round
-                if getattr(self.current_round, 'sequence_start_idx', None) is not None:
-                    sequence_start = self.current_round.sequence_start_idx
-                else:
-                    # Fallback: derive start by scanning for last break over 31
-                    sequence_start = 0
-                    for i in range(len(self.current_round.table) - 1, -1, -1):
-                        val_sum = sum(m['card'].get_value() for m in self.current_round.table[i:])
-                        if val_sum > 31:
-                            sequence_start = i + 1
-                            break
+                # Use the active sequence_start_idx tracked by the resumable round
+                sequence_start = getattr(self.current_round, 'sequence_start_idx', None)
+                if sequence_start is None:
+                    # Fallback: if we can't determine the sequence start, 
+                    # conservatively show 0 (should rarely happen)
+                    sequence_start = len(self.current_round.table)
                 table_value = sum(m['card'].get_value() for m in self.current_round.table[sequence_start:])
+
             
             if self.current_round.starter:
                 starter_card = card_to_data(self.current_round.starter)
@@ -283,6 +279,20 @@ class GameSession:
         if self.current_round and self.current_round.dealer:
             dealer = str(self.current_round.dealer).lower()
         
+        # Map player names to frontend-expected names
+        scores_dict = {}
+        for p in self.game.players:
+            player_name = str(p).lower()
+            # Map "human" to "you" for frontend compatibility
+            if player_name == "human":
+                scores_dict["you"] = self.game.board.get_score(p)
+            else:
+                scores_dict[player_name] = self.game.board.get_score(p)
+        
+        # Also map dealer name if it's "human"
+        if dealer == "human":
+            dealer = "you"
+        
         return GameStateResponse(
             game_id=self.game_id,
             action_required=self.waiting_for or ActionType.WAITING_FOR_COMPUTER,
@@ -290,7 +300,7 @@ class GameSession:
             your_hand=your_hand,
             computer_hand=computer_hand,
             table_cards=table_cards,
-            scores={str(p).lower(): self.game.board.get_score(p) for p in self.game.players},
+            scores=scores_dict,
             dealer=dealer,
             table_value=table_value,
             starter_card=starter_card,
@@ -347,82 +357,7 @@ class GameSession:
                 self.waiting_for = ActionType.SELECT_CARD_TO_PLAY
             
             return self.get_state()
-        """Advance the game until player input is needed."""
-        try:
-            # Start new round if needed
-            if self.current_round is None:
-                self.start_new_round()
-            
-            # Call play() - it will either complete or pause for input
-            # We wrap it to make repeated calls safe
-            r = self.current_round
-            
-            # Skip initialization if already done (check if hands are populated)
-            if not any(r.hands.values()):
-                # First time playing this round - hands are empty
-                r.play()
-            else:
-                # Resuming - manually continue from where we left off
-                # Since we can't easily resume play(), just call it again
-                # but skip the parts already done
-                
-                # The issue is play() will re-cut, re-deal, re-populate-crib
-                # We need to prevent this. Let's set a flag.
-                if not hasattr(r, '_initialized'):
-                    r._initialized = True
-                    r.play()
-                else:
-                    # Already initialized, just run the remaining parts
-                    # This is complex - we'd need to replicate play() logic
-                    # For now, let's just call play() and make it idempotent
-                    
-                    # Save current state
-                    saved_hands = {p: list(r.hands[p]) for p in r.hands}
-                    saved_crib = list(r.crib)
-                    saved_table = list(r.table)
-                    saved_starter = r.starter
-                    
-                    # Call play() which will try to re-initialize
-                    try:
-                        r.play()
-                    except AssertionError as e:
-                        # If we get assertion errors about crib size, restore state and skip
-                        if "Crib size" in str(e):
-                            # Restore state
-                            r.hands = saved_hands
-                            r.crib = saved_crib
-                            r.table = saved_table
-                            r.starter = saved_starter
-                            # The round is already complete or stuck
-                            # Mark as complete and move on
-                            pass
-                        else:
-                            raise
-            
-            # If we reach here without exception, round completed
-            # Check if game is over
-            for p in self.game.players:
-                if self.game.board.get_score(p) >= 121:
-                    self.game_over = True
-                    self.message = f"Game over! {p} wins!"
-                    return self.get_state()
-            
-            # Start new round
-            self.current_round = None
-            return self.advance()
-            
-        except AwaitingPlayerInput as e:
-            # Game paused waiting for player input
-            self.last_cards = e.cards
-            self.last_n_cards = e.n_cards
-            self.message = e.msg
-            
-            if e.n_cards == 2:
-                self.waiting_for = ActionType.SELECT_CRIB_CARDS
-            elif e.n_cards == 1:
-                self.waiting_for = ActionType.SELECT_CARD_TO_PLAY
-            
-            return self.get_state()
+
     
     def submit_action(self, card_indices: List[int]) -> GameStateResponse:
         """Submit player action and continue game."""
