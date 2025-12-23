@@ -385,7 +385,7 @@ def test_table_value_count_with_aces_and_twos():
     print(f"  ✓ Table value correct: {state.table_value}")
 
 
-def test_scoring_pairs_and_fifteens(monkeypatch):
+def test_scoring_pairs_and_fifteens(deterministic_computer):
     """Deterministic test: pairs score 2 and reaching 15 scores 2.
 
     We patch the computer's selection logic to be deterministic:
@@ -394,30 +394,7 @@ def test_scoring_pairs_and_fifteens(monkeypatch):
     - Otherwise play the first legal card
     We then run two separate scenarios to check both scoring cases.
     """
-
-    # Deterministic computer strategy
-    from cribbage.player import RandomPlayer as _RP
-
-    def _deterministic_select(self, hand, table, crib):
-        # table is a list of { 'player': Player, 'card': Card }
-        table_value = sum(m['card'].get_value() for m in table)
-        valid = [c for c in hand if c.get_value() + table_value <= 31]
-        if not valid:
-            return None
-        # Prefer making 15
-        for c in valid:
-            if c.get_value() + table_value == 15:
-                return c
-        # Prefer making a pair with last card
-        if table:
-            last_rank = table[-1]['card'].get_rank()
-            for c in valid:
-                if c.get_rank() == last_rank:
-                    return c
-        # Fallback: first valid
-        return valid[0]
-
-    monkeypatch.setattr(_RP, "select_card_to_play", _deterministic_select, raising=True)
+    # Deterministic behavior enabled via fixture
 
     # ---------- Scenario 1: 5 then 10 => 15 scores 2 ----------
     session = GameSession("test-scoring-15")

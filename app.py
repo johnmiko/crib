@@ -212,6 +212,23 @@ class ResumableRound:
         return self.round.dealer
 
 
+# Helper(s) to normalize player names for frontend
+def _to_frontend_name(name_or_player) -> str:
+    try:
+        name = name_or_player if isinstance(name_or_player, str) else str(name_or_player)
+    except Exception:
+        name = str(name_or_player)
+    name = name.lower()
+    return "you" if name == "human" else name
+
+
+def _map_scores_for_frontend(game: CribbageGame) -> Dict[str, int]:
+    scores: Dict[str, int] = {}
+    for p in game.players:
+        scores[_to_frontend_name(p)] = game.board.get_score(p)
+    return scores
+
+
 class GameSession:
     """Manages a single game session with pause/resume capability."""
     
@@ -271,27 +288,16 @@ class GameSession:
         for p in self.game.players:
             if self.game.board.get_score(p) >= 121:
                 self.game_over = True
-                winner = str(p).lower()
+                winner = _to_frontend_name(p)
                 break
         
         # Get dealer
         dealer = "none"
         if self.current_round and self.current_round.dealer:
-            dealer = str(self.current_round.dealer).lower()
+            dealer = _to_frontend_name(self.current_round.dealer)
         
-        # Map player names to frontend-expected names
-        scores_dict = {}
-        for p in self.game.players:
-            player_name = str(p).lower()
-            # Map "human" to "you" for frontend compatibility
-            if player_name == "human":
-                scores_dict["you"] = self.game.board.get_score(p)
-            else:
-                scores_dict[player_name] = self.game.board.get_score(p)
-        
-        # Also map dealer name if it's "human"
-        if dealer == "human":
-            dealer = "you"
+        # Scores mapped for frontend
+        scores_dict = _map_scores_for_frontend(self.game)
         
         return GameStateResponse(
             game_id=self.game_id,
