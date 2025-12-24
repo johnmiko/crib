@@ -11,7 +11,7 @@ from cribbage.player import Player, RandomPlayer
 from cribbage.models import ActionType, GameStateResponse, PlayerAction, CardData
 from cribbage.playingcards import Card, Deck
 from cribbage.opponents import get_opponent_strategy, list_opponent_types, OpponentStrategy
-from database import init_db, record_match_result, get_user_stats
+from database import init_db, record_match_result, get_user_stats, get_game_history
 from pydantic import BaseModel
 
 
@@ -146,6 +146,9 @@ class ResumableRound:
         self.sequence_start_idx = 0
         # Optional overrides for deterministic starts
         self.overrides: Dict = {}
+        # Track pegging scores for stats
+        self.pegging_scores: Dict = {}  # {player: total_points}
+        self.pegging_rounds_count = 0  # Number of scoring events
         
     def run(self):
         """Run the round until completion or until player input needed."""
@@ -220,6 +223,11 @@ class ResumableRound:
                             debug(f"[PLAY] {p} plays {card} -> value={r.get_table_value(self.sequence_start_idx)}")
                             score = r._score_play(card_seq=[move['card'] for move in r.table[self.sequence_start_idx:]])
                             if score:
+                                # Track pegging score
+                                if p not in self.pegging_scores:
+                                    self.pegging_scores[p] = 0
+                                self.pegging_scores[p] += score
+                                self.pegging_rounds_count += 1
                                 r.game.board.peg(p, score)
                 
                 r.go_or_31_reached(self.active_players)
@@ -300,6 +308,19 @@ class GameSession:
         self.next_round_overrides: Dict = {}
         # Last round summary for client pause
         self.last_round_summary: Optional[Dict] = None
+        
+        # Stats tracking for match history
+        self.total_points_pegged_human = 0
+        self.total_points_pegged_computer = 0
+        self.pegging_rounds = 0
+        self.total_hand_score_human = 0
+        self.total_hand_score_computer = 0
+        self.human_hands_count = 0
+        self.computer_hands_count = 0
+        self.total_crib_score_human = 0
+        self.total_crib_score_computer = 0
+        self.human_dealer_count = 0
+        self.computer_dealer_count = 0
         
     def get_state(self) -> GameStateResponse:
         """Get current game state."""
@@ -383,6 +404,29 @@ class GameSession:
             self.next_round_overrides = {}
         self.round_num += 1
     
+    def calculate_game_stats(self) -> tuple[float, float, float]:
+        """
+        Calculate average stats for the completed game.
+        Returns: (avg_points_pegged, avg_hand_score, avg_crib_score)
+        """
+        avg_points_pegged = 0.0
+        avg_hand_score = 0.0
+        avg_crib_score = 0.0
+        
+        # Average points pegged (pegging happens in sequences)
+        if self.pegging_rounds > 0:
+            avg_points_pegged = self.total_points_pegged_human / self.pegging_rounds
+        
+        # Average hand score
+        if self.human_hands_count > 0:
+            avg_hand_score = self.total_hand_score_human / self.human_hands_count
+        
+        # Average crib score (only when human was dealer)
+        if self.human_dealer_count > 0:
+            avg_crib_score = self.total_crib_score_human / self.human_dealer_count
+        
+        return avg_points_pegged, avg_hand_score, avg_crib_score
+    
     def advance(self) -> GameStateResponse:
         """Advance the game until player input is needed."""
         try:
@@ -399,6 +443,13 @@ class GameSession:
             summary_hands: Dict[str, List[Card]] = {}
             summary_points: Dict[str, int] = {}
             summary_breakdowns: Dict[str, List[Dict[str, any]]] = {}
+            
+            # Track pegging scores from this round
+            if self.human in self.current_round.pegging_scores:
+                self.total_points_pegged_human += self.current_round.pegging_scores[self.human]
+            if self.computer in self.current_round.pegging_scores:
+                self.total_points_pegged_computer += self.current_round.pegging_scores[self.computer]
+            self.pegging_rounds += self.current_round.pegging_rounds_count
 
             # Hands with starter for scoring context
             for p in self.game.players:
@@ -408,6 +459,14 @@ class GameSession:
                 points, breakdown = r._score_hand_with_breakdown(hand_cards, is_crib=False)
                 summary_points[_to_frontend_name(p)] = points
                 summary_breakdowns[_to_frontend_name(p)] = breakdown
+                
+                # Track hand scores for stats
+                if p == self.human:
+                    self.total_hand_score_human += points
+                    self.human_hands_count += 1
+                else:
+                    self.total_hand_score_computer += points
+                    self.computer_hands_count += 1
 
             # Crib
             crib_cards = r.crib + ([r.starter] if r.starter else [])
@@ -415,6 +474,14 @@ class GameSession:
             crib_points, crib_breakdown = r._score_hand_with_breakdown(crib_cards, is_crib=True)
             summary_points['crib'] = crib_points
             summary_breakdowns['crib'] = crib_breakdown
+            
+            # Track crib scores for stats
+            if r.dealer == self.human:
+                self.total_crib_score_human += crib_points
+                self.human_dealer_count += 1
+            else:
+                self.total_crib_score_computer += crib_points
+                self.computer_dealer_count += 1
 
             self.last_round_summary = {
                 'hands': summary_hands,
@@ -431,7 +498,15 @@ class GameSession:
                     # Record match result (only if not already recorded and user_id exists)
                     if not self.match_recorded and self.user_id:
                         won = (p == self.human)
-                        record_match_result(self.user_id, self.opponent_type, won)
+                        avg_points_pegged, avg_hand_score, avg_crib_score = self.calculate_game_stats()
+                        record_match_result(
+                            self.user_id,
+                            self.opponent_type,
+                            won,
+                            average_points_pegged=avg_points_pegged,
+                            average_hand_score=avg_hand_score,
+                            average_crib_score=avg_crib_score
+                        )
                         self.match_recorded = True
                     
                     return self.get_state()
@@ -614,8 +689,19 @@ def delete_game(game_id: str):
 
 @app.get("/stats/{user_id}")
 def get_stats(user_id: str):
-    """Get match statistics for a user."""
+    """Get aggregated match statistics for a user."""
     stats = get_user_stats(user_id)
     if not stats:
         return {"user_id": user_id, "stats": []}
     return {"user_id": user_id, "stats": stats}
+
+
+@app.get("/stats/{user_id}/history")
+def get_game_history(user_id: str, opponent_id: str = None, limit: int = 50):
+    """Get individual game history for a user (for charting/analysis)."""
+    history = get_game_history(user_id, opponent_id=opponent_id, limit=limit)
+    return {
+        "user_id": user_id,
+        "opponent_id": opponent_id,
+        "games": history
+    }
