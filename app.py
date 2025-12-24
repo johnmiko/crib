@@ -3,6 +3,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Optional, List, Literal
+from contextlib import asynccontextmanager
 import uuid
 
 from cribbage.cribbagegame import CribbageGame, CribbageRound, debug
@@ -10,10 +11,20 @@ from cribbage.player import Player, RandomPlayer
 from cribbage.models import ActionType, GameStateResponse, PlayerAction, CardData
 from cribbage.playingcards import Card, Deck
 from cribbage.opponents import get_opponent_strategy, list_opponent_types, OpponentStrategy
+from database import init_db, record_match_result, get_user_stats
 from pydantic import BaseModel
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize and cleanup resources."""
+    # Startup: Initialize database tables
+    init_db()
+    yield
+    # Shutdown: cleanup if needed (none required currently)
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Configure CORS - allow all origins for development
 # Note: When allow_credentials=True, allow_origins cannot be ["*"]
@@ -263,9 +274,10 @@ def _map_scores_for_frontend(game: CribbageGame) -> Dict[str, int]:
 class GameSession:
     """Manages a single game session with pause/resume capability."""
     
-    def __init__(self, game_id: str, opponent_type: str = "random"):
+    def __init__(self, game_id: str, opponent_type: str = "random", user_id: Optional[str] = None):
         self.game_id = game_id
         self.opponent_type = opponent_type
+        self.user_id = user_id  # Track user for match statistics
         self.human = APIPlayer("human")
         strategy = get_opponent_strategy(opponent_type)
         self.computer = StrategyPlayer("computer", strategy)
@@ -277,6 +289,7 @@ class GameSession:
         self.last_n_cards: int = 0
         self.game_over: bool = False
         self.round_num: int = 0
+        self.match_recorded: bool = False  # Track if we've recorded stats
         # One-time overrides for next new round
         self.next_dealer_override: Optional[Player] = None
         self.next_round_overrides: Dict = {}
@@ -409,6 +422,13 @@ class GameSession:
                 if self.game.board.get_score(p) >= 121:
                     self.game_over = True
                     self.message = f"Game over! {p} wins!"
+                    
+                    # Record match result (only if not already recorded and user_id exists)
+                    if not self.match_recorded and self.user_id:
+                        won = (p == self.human)
+                        record_match_result(self.user_id, self.opponent_type, won)
+                        self.match_recorded = True
+                    
                     return self.get_state()
 
             # Pause before starting next round
@@ -469,6 +489,7 @@ class CreateGameRequest(BaseModel):
     dealer: Optional[Literal['human','computer','you','player']] = None
     preset: Optional[Literal['aces_twos_vs_threes_fours']] = None
     opponent_type: Optional[str] = "random"  # "random", "greedy", "defensive"
+    user_id: Optional[str] = None  # Optional user ID for match statistics
     # Future: explicit card lists like ["ace-hearts", "two-spades"], not used yet
     human_cards: Optional[List[str]] = None
     computer_cards: Optional[List[str]] = None
@@ -518,15 +539,19 @@ def create_game(req: Optional[CreateGameRequest] = None) -> GameStateResponse:
     """Create a new game with optional deterministic setup."""
     game_id = str(uuid.uuid4())
     
-    # Get opponent type from request or use default
+    # Get opponent type and user_id from request or use defaults
     opponent_type = "random"
-    if req and req.opponent_type:
-        opponent_type = req.opponent_type
-        # Validate opponent type
-        if opponent_type not in list_opponent_types():
-            raise HTTPException(status_code=400, detail=f"Invalid opponent_type. Must be one of: {list_opponent_types()}")
+    user_id = None
+    if req:
+        if req.opponent_type:
+            opponent_type = req.opponent_type
+            # Validate opponent type
+            if opponent_type not in list_opponent_types():
+                raise HTTPException(status_code=400, detail=f"Invalid opponent_type. Must be one of: {list_opponent_types()}")
+        if req.user_id:
+            user_id = req.user_id
     
-    session = GameSession(game_id, opponent_type=opponent_type)
+    session = GameSession(game_id, opponent_type=opponent_type, user_id=user_id)
 
     # Configure dealer if specified
     if req and req.dealer:
@@ -580,3 +605,12 @@ def delete_game(game_id: str):
         raise HTTPException(status_code=404, detail="Game not found")
     del games[game_id]
     return {"status": "deleted"}
+
+
+@app.get("/stats/{user_id}")
+def get_stats(user_id: str):
+    """Get match statistics for a user."""
+    stats = get_user_stats(user_id)
+    if not stats:
+        return {"user_id": user_id, "stats": []}
+    return {"user_id": user_id, "stats": stats}
