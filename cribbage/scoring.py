@@ -39,6 +39,39 @@ class HasPairTripleQuad(ScoreCondition):
         return score, description
 
 
+class HasPairs_InHand(ScoreCondition):
+    """Find all pairs/triples/quads in a hand (not just consecutive)."""
+    def check(self, cards):
+        if len(cards) < 2:
+            return 0, ""
+        
+        # Count cards of each rank
+        rank_counts = {}
+        for card in cards:
+            rank_name = card.rank['name']
+            rank_counts[rank_name] = rank_counts.get(rank_name, 0) + 1
+        
+        # Calculate score based on pairs
+        score = 0
+        descriptions = []
+        for rank_name, count in rank_counts.items():
+            if count == 2:
+                score += 2
+                rank_symbol = next(card.rank['symbol'] for card in cards if card.rank['name'] == rank_name)
+                descriptions.append(f"Pair ({rank_symbol})")
+            elif count == 3:
+                score += 6  # 3 pairs from 3 cards
+                rank_symbol = next(card.rank['symbol'] for card in cards if card.rank['name'] == rank_name)
+                descriptions.append(f"Pair Royal ({rank_symbol})")
+            elif count == 4:
+                score += 12  # 6 pairs from 4 cards
+                rank_symbol = next(card.rank['symbol'] for card in cards if card.rank['name'] == rank_name)
+                descriptions.append(f"Double Pair Royal ({rank_symbol})")
+        
+        description = ", ".join(descriptions) if descriptions else ""
+        return score, description
+
+
 class ExactlyEqualsN(ScoreCondition):
 
     def __init__(self, n):

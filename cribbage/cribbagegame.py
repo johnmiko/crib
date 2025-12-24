@@ -224,12 +224,30 @@ class CribbageRound:
         """
         score = 0
         score_scenarios = [scoring.CountCombinationsEqualToN(n=15),
-                           scoring.HasPairTripleQuad(), scoring.HasStraight_InHand(), scoring.HasFlush(is_crib=is_crib)]
+                           scoring.HasPairs_InHand(), scoring.HasStraight_InHand(), scoring.HasFlush(is_crib=is_crib)]
         for scenario in score_scenarios:
             s, desc = scenario.check(cards[:])
             score += s
             print("[EOR SCORING] " + desc) if desc else None
         return score
+
+    def _score_hand_with_breakdown(self, cards, is_crib: bool = False):
+        """Score a hand and return both score and breakdown.
+
+        :param cards: Cards in a single player's hand.
+        :param is_crib: Whether this is scoring a crib.
+        :return: Tuple of (total_score, list of score descriptions).
+        """
+        score = 0
+        breakdown = []
+        score_scenarios = [scoring.CountCombinationsEqualToN(n=15),
+                           scoring.HasPairs_InHand(), scoring.HasStraight_InHand(), scoring.HasFlush(is_crib=is_crib)]
+        for scenario in score_scenarios:
+            s, desc = scenario.check(cards[:])
+            if s > 0 and desc:
+                score += s
+                breakdown.append({"points": s, "description": desc})
+        return score, breakdown
 
 
 class CribbageBoard:

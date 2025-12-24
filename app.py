@@ -347,22 +347,28 @@ class GameSession:
             r = self.current_round.round
             summary_hands: Dict[str, List[Card]] = {}
             summary_points: Dict[str, int] = {}
+            summary_breakdowns: Dict[str, List[Dict[str, any]]] = {}
 
             # Hands with starter for scoring context
             for p in self.game.players:
                 played_cards = [move['card'] for move in r.table if move['player'] == p]
                 hand_cards = played_cards + ([r.starter] if r.starter else [])
                 summary_hands[_to_frontend_name(p)] = [card_to_data(c) for c in hand_cards]
-                summary_points[_to_frontend_name(p)] = r._score_hand(hand_cards)
+                points, breakdown = r._score_hand_with_breakdown(hand_cards, is_crib=False)
+                summary_points[_to_frontend_name(p)] = points
+                summary_breakdowns[_to_frontend_name(p)] = breakdown
 
             # Crib
             crib_cards = r.crib + ([r.starter] if r.starter else [])
             summary_hands['crib'] = [card_to_data(c) for c in crib_cards]
-            summary_points['crib'] = r._score_hand(crib_cards, is_crib=True)
+            crib_points, crib_breakdown = r._score_hand_with_breakdown(crib_cards, is_crib=True)
+            summary_points['crib'] = crib_points
+            summary_breakdowns['crib'] = crib_breakdown
 
             self.last_round_summary = {
                 'hands': summary_hands,
                 'points': summary_points,
+                'breakdowns': summary_breakdowns,
             }
 
             # Check if game is over

@@ -314,7 +314,7 @@ class GameState:
         score = 0
         score_scenarios = [
             scoring.CountCombinationsEqualToN(n=15),
-            scoring.HasPairTripleQuad(),
+            scoring.HasPairs_InHand(),
             scoring.HasStraight_InHand(),
             scoring.HasFlush(is_crib=is_crib)
         ]
