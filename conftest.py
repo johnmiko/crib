@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from cribbage.player import RandomPlayer as _RandomPlayer
-from cribbage.opponents import RandomOpponent
+
+from crib_api.opponents import RandomOpponent
 
 # Add the project root to sys.path
 project_root = Path(__file__).parent

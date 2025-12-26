@@ -8,9 +8,9 @@ import uuid
 
 from cribbage.cribbagegame import CribbageGame, CribbageRound, debug
 from cribbage.player import Player, RandomPlayer
-from cribbage.models import ActionType, GameStateResponse, PlayerAction, CardData
+from crib_api.models import ActionType, GameStateResponse, PlayerAction, CardData
 from cribbage.playingcards import Card, Deck
-from cribbage.opponents import get_opponent_strategy, list_opponent_types, OpponentStrategy
+from crib_api.opponents import get_opponent_strategy, list_opponent_types, OpponentStrategy
 from database import init_db, record_match_result, get_user_stats, get_game_history as db_get_game_history, upsert_google_user
 import os
 from google.oauth2 import id_token

@@ -7,8 +7,7 @@ from typing import List
 from pathlib import Path
 from itertools import combinations
 
-from .playingcards import Card
-from .bestai_opponent import BestAIOpponent
+from cribbage.playingcards import Card
 
 
 class OpponentStrategy(ABC):
@@ -428,7 +427,7 @@ OPPONENT_REGISTRY = {
     "linearb": LinearBOpponent,
     "deeppeg": DeepPegOpponent,
     "myrmidon": MyrmidonOpponent,
-    "bestai": BestAIOpponent,
+    # "bestai": BestAIOpponent,
 }
 
 
